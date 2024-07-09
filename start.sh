@@ -7,4 +7,4 @@ else
     params+=(--password ${FSP_PASSWORD})
 fi
 
-python -u ./fspd.py --directory /usr/src/app "${params[@]}"
+python -u ./fspd.py --directory /usr/src/app/data "${params[@]}"
