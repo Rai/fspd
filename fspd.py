@@ -11,6 +11,7 @@ __references__ = [
 
 import re
 import os
+import shutil
 import zlib
 import socket
 import argparse
@@ -663,22 +664,32 @@ class FSPPacketHandler(DatagramRequestHandler):
 				self.wfile.write(buf)
 
 	def handle_up_load(self) -> None:
-		with open(FSP_UP_LOAD_CACHE_FILE, "a+b") as f:
+		tmpfullpath = f"{os.getcwd()}/tmp/{self.client_address[0]}_{self.client_address[1]}"
+
+		if not os.path.exists(tmpfullpath):
+			os.makedirs(tmpfullpath, exist_ok=True)
+		
+		with open(f"{tmpfullpath}/{FSP_UP_LOAD_CACHE_FILE}", "a+b") as f:
 			f.seek(self.fsp.position)
 			f.write(self.fsp.data)
-
+		
 		rep = FSPPacket.create(self.fsp.command, b"", self.fsp.position, self.fsp.sequence).to_bytes()
 		self.wfile.write(rep)
 
 	def handle_install(self) -> None:
-		print(f"Installing file to \"{self.fsp.path}\"...")
+		tmpfullpath = f"{os.getcwd()}/tmp/{self.client_address[0]}_{self.client_address[1]}"
 
-		os.rename(FSP_UP_LOAD_CACHE_FILE, self.fsp.path)
+		print(f"{self.client_address} is Installing file to \"{self.fsp.path}\"...")
+
+		shutil.copy(f"{tmpfullpath}/{FSP_UP_LOAD_CACHE_FILE}", self.fsp.path)
+		shutil.rmtree(tmpfullpath)
 
 		rep = FSPPacket.create(self.fsp.command, b"", 0, self.fsp.sequence).to_bytes()
 		self.wfile.write(rep)
 
 	def handle_del_file(self) -> None:
+		global FSP_LAST_GET_DIR_PKTS
+		
 		print(f"Deleting file \"{self.fsp.path}\"...")
 
 		if osp.isfile(self.fsp.path):
@@ -686,6 +697,9 @@ class FSPPacketHandler(DatagramRequestHandler):
 			rep = FSPPacket.create(self.fsp.command, b"", self.fsp.position, self.fsp.sequence).to_bytes()
 		else:
 			rep = FSPPacket.create(FSPCommand.CC_ERR, b"Error deleting file!", 0, self.fsp.sequence).to_bytes()
+		
+		FSP_LAST_GET_DIR_PKTS = []
+
 		self.wfile.write(rep)
 
 	def handle_get_pro(self) -> None:
@@ -774,6 +788,11 @@ def parse_hostname_port(s: str):
 
 def main() -> None:
 	global FSP_PASSWORD, FSP_SERVER_DIR
+
+	if os.path.exists(os.getcwd() + "/tmp"):
+		shutil.rmtree(os.getcwd() + "/tmp");
+	
+	os.mkdir(os.getcwd() + "/tmp");
 
 	# check python version before running
 	assert version_info.major == 3 and version_info.minor >= 8, "This script requires Python 3.8 or greater!"
