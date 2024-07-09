@@ -39,7 +39,7 @@ FSP_PASSWORD = ""
 FSP_LAST_GET_FILE = ""
 FSP_LAST_GCZ_FILE = None
 FSP_LAST_GET_DIR = ""
-FSP_LAST_GET_DIR_PKTS = []
+FSP_LAST_GET_DIR_PKTS = {}
 
 def calc_pad_size(data: Union[bytes, bytearray], boundary: int) -> int:
 	return 0 if len(data) == boundary else (boundary - len(data) % boundary)
@@ -557,10 +557,13 @@ class FSPPacketHandler(DatagramRequestHandler):
 		pkt_num = self.fsp.position // FSP_SPACE
 		pkt_off = self.fsp.position % FSP_SPACE
 
-		# cache the directory contents
-		if FSP_LAST_GET_DIR == "" or len(FSP_LAST_GET_DIR_PKTS) == 0 or self.fsp.path != FSP_LAST_GET_DIR:
+		if self.client_address[1] not in FSP_LAST_GET_DIR_PKTS:
+			FSP_LAST_GET_DIR_PKTS[self.client_address[1]] = []
+
+		# cache the directory contents for socket
+		if FSP_LAST_GET_DIR == "" or len(FSP_LAST_GET_DIR_PKTS[self.client_address[1]]) == 0 or self.fsp.path != FSP_LAST_GET_DIR:
 			FSP_LAST_GET_DIR = self.fsp.path
-			FSP_LAST_GET_DIR_PKTS = []
+			FSP_LAST_GET_DIR_PKTS[self.client_address[1]] = []
 
 			rdir_ents = []
 			files = os.listdir(self.fsp.path)
@@ -603,16 +606,16 @@ class FSPPacketHandler(DatagramRequestHandler):
 					elif len(rdir_pkt) + len(rdir_ent) <= FSP_SPACE:  # block fits within the directory block boundary
 						rdir_pkt += rdir_ent
 				# add the packet to the send queue
-				FSP_LAST_GET_DIR_PKTS.append(rdir_pkt)
+				FSP_LAST_GET_DIR_PKTS[self.client_address[1]].append(rdir_pkt)
 				# no more entries left so let's leave the loop and send them
 				if len(rdir_ents) == 0:
 					break
 
 		# send the cached packets
-		if self.fsp.path == FSP_LAST_GET_DIR and len(FSP_LAST_GET_DIR_PKTS) > 0:
+		if self.fsp.path == FSP_LAST_GET_DIR and len(FSP_LAST_GET_DIR_PKTS[self.client_address[1]]) > 0:
 			if pkt_num == 0:
 				print(f"Reading directory \"{self.fsp.path}\"...")
-			rep = FSPPacket.create(self.fsp.command, FSP_LAST_GET_DIR_PKTS[pkt_num][pkt_off:], self.fsp.position, self.fsp.sequence).to_bytes()
+			rep = FSPPacket.create(self.fsp.command, FSP_LAST_GET_DIR_PKTS[self.client_address[1]][pkt_num][pkt_off:], self.fsp.position, self.fsp.sequence).to_bytes()
 			self.socket.sendto(rep, self.client_address)
 
 	def handle_get_file(self) -> None:
@@ -689,7 +692,7 @@ class FSPPacketHandler(DatagramRequestHandler):
 
 	def handle_del_file(self) -> None:
 		global FSP_LAST_GET_DIR_PKTS
-		
+
 		print(f"Deleting file \"{self.fsp.path}\"...")
 
 		if osp.isfile(self.fsp.path):
@@ -698,7 +701,8 @@ class FSPPacketHandler(DatagramRequestHandler):
 		else:
 			rep = FSPPacket.create(FSPCommand.CC_ERR, b"Error deleting file!", 0, self.fsp.sequence).to_bytes()
 		
-		FSP_LAST_GET_DIR_PKTS = []
+		# Clear the cache for this socket
+		FSP_LAST_GET_DIR_PKTS[self.client_address[1]] = []
 
 		self.wfile.write(rep)
 
