@@ -63,14 +63,14 @@ def clean_old_caches():
 	print("Cleaning old caches...")
 	dir_cache_cleaned = 0
 	file_cache_cleaned = 0
-	for obj in FSP_LAST_GET_DIR_TIME:
+	for obj in list(FSP_LAST_GET_DIR_TIME):
 		if (time.time() - FSP_LAST_GET_DIR_TIME[obj]) >= 1200:
 			dir_cache_cleaned += 1
 			del FSP_LAST_GET_DIR[obj]
 			del FSP_LAST_GET_DIR_PKTS[obj]
 			del FSP_LAST_GET_DIR_TIME[obj]
 	
-	for obj in FSP_LAST_GET_FILE_TIME:
+	for obj in list(FSP_LAST_GET_FILE_TIME):
 		if (time.time() - FSP_LAST_GET_FILE_TIME[obj]) >= 1200:
 			file_cache_cleaned += 1
 			del FSP_LAST_GET_FILE[obj]
