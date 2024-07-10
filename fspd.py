@@ -62,8 +62,11 @@ def every(delay, task):
 def clean_old_caches():
 	print("Cleaning old caches...")
 	dir_cache_cleaned = 0
+	dir_total = 0
 	file_cache_cleaned = 0
+	file_total = 0
 	for obj in list(FSP_LAST_GET_DIR_TIME):
+		dir_total += 1
 		if (time.time() - FSP_LAST_GET_DIR_TIME[obj]) >= 1200:
 			dir_cache_cleaned += 1
 			del FSP_LAST_GET_DIR[obj]
@@ -71,13 +74,14 @@ def clean_old_caches():
 			del FSP_LAST_GET_DIR_TIME[obj]
 	
 	for obj in list(FSP_LAST_GET_FILE_TIME):
+		file_total += 1
 		if (time.time() - FSP_LAST_GET_FILE_TIME[obj]) >= 1200:
 			file_cache_cleaned += 1
 			del FSP_LAST_GET_FILE[obj]
 			del FSP_LAST_GCZ_FILE[obj]
 			del FSP_LAST_GET_FILE_TIME[obj]
 	
-	print(f"Cleaned {dir_cache_cleaned} directory caches and {file_cache_cleaned} file caches")
+	print(f"Cleaned {dir_cache_cleaned}/{dir_total} directory caches and {file_cache_cleaned}/{file_total} file caches")
 
 def global_clear_caches():
 	global FSP_LAST_GET_FILE, FSP_LAST_GCZ_FILE, FSP_LAST_GET_FILE_TIME, FSP_LAST_GET_DIR, FSP_LAST_GET_DIR_PKTS, FSP_LAST_GET_DIR_TIME
