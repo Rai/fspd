@@ -800,7 +800,7 @@ class FSPPacketHandler(DatagramRequestHandler):
 		print(f"{self.client_address} Creating directory \"{self.fsp.path}\"...")
 
 		if not osp.isdir(self.fsp.path):
-			os.mkdir(self.fsp.path)
+			os.makedirs(self.fsp.path)
 
 		# Clear the cache for everyone connected
 		global_clear_caches()
