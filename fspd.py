@@ -11,6 +11,10 @@ __references__ = [
 
 import re
 import os
+import shutil
+import threading
+import time 
+import traceback
 import zlib
 import socket
 import argparse
@@ -35,10 +39,59 @@ FSP_KEY = None
 FSP_SERVER_DIR = ""
 FSP_PASSWORD = ""
 # caches
-FSP_LAST_GET_FILE = ""
-FSP_LAST_GCZ_FILE = None
-FSP_LAST_GET_DIR = ""
-FSP_LAST_GET_DIR_PKTS = []
+FSP_LAST_GET_FILE = {}
+FSP_LAST_GCZ_FILE = {}
+FSP_LAST_GET_FILE_TIME = {}
+FSP_LAST_GET_DIR = {}
+FSP_LAST_GET_DIR_PKTS = {}
+FSP_LAST_GET_DIR_TIME = {}
+
+def every(delay, task):
+  next_time = time.time() + delay
+  while True:
+    time.sleep(max(0, next_time - time.time()))
+    try:
+      task()
+    except Exception:
+      traceback.print_exc()
+      # in production code you might want to have this instead of course:
+      # logger.exception("Problem while executing repetitive task.")
+    # skip tasks if we are behind schedule:
+    next_time += (time.time() - next_time) // delay * delay + delay
+	
+def clean_old_caches():
+	print("Cleaning old caches...")
+	dir_cache_cleaned = 0
+	dir_total = 0
+	file_cache_cleaned = 0
+	file_total = 0
+	for obj in list(FSP_LAST_GET_DIR_TIME):
+		dir_total += 1
+		if (time.time() - FSP_LAST_GET_DIR_TIME[obj]) >= 1200:
+			dir_cache_cleaned += 1
+			del FSP_LAST_GET_DIR[obj]
+			del FSP_LAST_GET_DIR_PKTS[obj]
+			del FSP_LAST_GET_DIR_TIME[obj]
+	
+	for obj in list(FSP_LAST_GET_FILE_TIME):
+		file_total += 1
+		if (time.time() - FSP_LAST_GET_FILE_TIME[obj]) >= 1200:
+			file_cache_cleaned += 1
+			del FSP_LAST_GET_FILE[obj]
+			del FSP_LAST_GCZ_FILE[obj]
+			del FSP_LAST_GET_FILE_TIME[obj]
+	
+	print(f"Cleaned {dir_cache_cleaned}/{dir_total} directory caches and {file_cache_cleaned}/{file_total} file caches")
+
+def global_clear_caches():
+	global FSP_LAST_GET_FILE, FSP_LAST_GCZ_FILE, FSP_LAST_GET_FILE_TIME, FSP_LAST_GET_DIR, FSP_LAST_GET_DIR_PKTS, FSP_LAST_GET_DIR_TIME
+
+	FSP_LAST_GET_FILE = {}
+	FSP_LAST_GCZ_FILE = {}
+	FSP_LAST_GET_FILE_TIME = {}
+	FSP_LAST_GET_DIR = {}
+	FSP_LAST_GET_DIR_PKTS = {}
+	FSP_LAST_GET_DIR_TIME = {}
 
 def calc_pad_size(data: Union[bytes, bytearray], boundary: int) -> int:
 	return 0 if len(data) == boundary else (boundary - len(data) % boundary)
@@ -447,7 +500,7 @@ class FSPPacket:
 		assert fsp.checksum == calc_cksm, f"Invalid FSP checksum, received: 0x{fsp.checksum:02X}, calculated: 0x{calc_cksm:02X}"
 
 		# command-specific parsing
-		if fsp.command in [FSPCommand.CC_GET_DIR, FSPCommand.CC_GET_PRO, FSPCommand.CC_MAKE_DIR]:
+		if fsp.command in [FSPCommand.CC_GET_DIR, FSPCommand.CC_GET_PRO, FSPCommand.CC_MAKE_DIR, FSPCommand.CC_DEL_DIR]:
 			(fsp.directory, fsp.password) = [x.rstrip(b"\x00").decode("UTF8") for x in fsp.data.split(b"\n", 1)]
 			fsp.path = pjoin(FSP_SERVER_DIR, fsp.directory.lstrip("/"))
 		elif fsp.command == FSPCommand.CC_RENAME:
@@ -502,8 +555,6 @@ class FSPPacketHandler(DatagramRequestHandler):
 	socket = None
 
 	def handle(self) -> None:
-		global FSP_LAST_GET_FILE
-
 		data = self.rfile.read(FSP_MAXSPACE)
 
 		# Handle Swiss broadcast message
@@ -538,6 +589,8 @@ class FSPPacketHandler(DatagramRequestHandler):
 			self.handle_stat()
 		elif self.fsp.command == FSPCommand.CC_RENAME:
 			self.handle_rename()
+		elif self.fsp.command == FSPCommand.CC_DEL_DIR:
+			self.handle_del_dir()
 		else:
 			self.handle_unhandled()
 
@@ -556,10 +609,23 @@ class FSPPacketHandler(DatagramRequestHandler):
 		pkt_num = self.fsp.position // FSP_SPACE
 		pkt_off = self.fsp.position % FSP_SPACE
 
-		# cache the directory contents
-		if FSP_LAST_GET_DIR == "" or len(FSP_LAST_GET_DIR_PKTS) == 0 or self.fsp.path != FSP_LAST_GET_DIR:
-			FSP_LAST_GET_DIR = self.fsp.path
-			FSP_LAST_GET_DIR_PKTS = []
+		if self.client_address[1] not in FSP_LAST_GET_DIR:
+			FSP_LAST_GET_DIR[self.client_address[1]] = ""
+
+		if self.client_address[1] not in FSP_LAST_GET_DIR_PKTS:
+			FSP_LAST_GET_DIR_PKTS[self.client_address[1]] = []
+
+		if self.client_address[1] not in FSP_LAST_GET_DIR_TIME:
+			FSP_LAST_GET_DIR_TIME[self.client_address[1]] = 0.0
+
+		# cache the directory contents for socket
+		if (FSP_LAST_GET_DIR[self.client_address[1]] == "" 
+	  	or len(FSP_LAST_GET_DIR_PKTS[self.client_address[1]]) == 0 
+	  	or self.fsp.path != FSP_LAST_GET_DIR[self.client_address[1]]
+		or (time.time() - FSP_LAST_GET_DIR_TIME[self.client_address[1]]) >= 120):
+
+			FSP_LAST_GET_DIR[self.client_address[1]] = self.fsp.path
+			FSP_LAST_GET_DIR_PKTS[self.client_address[1]] = []
 
 			rdir_ents = []
 			files = os.listdir(self.fsp.path)
@@ -602,60 +668,83 @@ class FSPPacketHandler(DatagramRequestHandler):
 					elif len(rdir_pkt) + len(rdir_ent) <= FSP_SPACE:  # block fits within the directory block boundary
 						rdir_pkt += rdir_ent
 				# add the packet to the send queue
-				FSP_LAST_GET_DIR_PKTS.append(rdir_pkt)
+				FSP_LAST_GET_DIR_PKTS[self.client_address[1]].append(rdir_pkt)
+				FSP_LAST_GET_DIR_TIME[self.client_address[1]] = time.time()
 				# no more entries left so let's leave the loop and send them
 				if len(rdir_ents) == 0:
 					break
 
 		# send the cached packets
-		if self.fsp.path == FSP_LAST_GET_DIR and len(FSP_LAST_GET_DIR_PKTS) > 0:
+		if self.fsp.path == FSP_LAST_GET_DIR[self.client_address[1]] and len(FSP_LAST_GET_DIR_PKTS[self.client_address[1]]) > 0:
 			if pkt_num == 0:
-				print(f"Reading directory \"{self.fsp.path}\"...")
-			rep = FSPPacket.create(self.fsp.command, FSP_LAST_GET_DIR_PKTS[pkt_num][pkt_off:], self.fsp.position, self.fsp.sequence).to_bytes()
+				print(f"{self.client_address} Reading directory \"{self.fsp.path}\"...")
+			rep = FSPPacket.create(self.fsp.command, FSP_LAST_GET_DIR_PKTS[self.client_address[1]][pkt_num][pkt_off:], self.fsp.position, self.fsp.sequence).to_bytes()
 			self.socket.sendto(rep, self.client_address)
+
+	def handle_del_dir(self) -> None:
+		print(f"{self.client_address} Deleting directory \"{self.fsp.path}\"...")
+
+		if osp.isdir(self.fsp.path):
+			shutil.rmtree(self.fsp.path, ignore_errors=True)
+			rep = FSPPacket.create(self.fsp.command, b"", self.fsp.position, self.fsp.sequence).to_bytes()
+		else:
+			rep = FSPPacket.create(FSPCommand.CC_ERR, b"Error deleting directory!", 0, self.fsp.sequence).to_bytes()
+
+		self.wfile.write(rep)
 
 	def handle_get_file(self) -> None:
 		global FSP_LAST_GET_FILE, FSP_LAST_GCZ_FILE
 
 		self.fsp.block_size = FSP_SPACE
 
-		if (FSP_LAST_GET_FILE == "" or FSP_LAST_GET_FILE != self.fsp.path):
-			FSP_LAST_GET_FILE = self.fsp.path
-			print(f"Serving file \"{self.fsp.path}\"...")
+		if self.client_address[1] not in FSP_LAST_GET_FILE:
+			FSP_LAST_GET_FILE[self.client_address[1]] = ""
+
+		if self.client_address[1] not in FSP_LAST_GET_FILE_TIME:
+			FSP_LAST_GET_FILE_TIME[self.client_address[1]] = 0.0
+
+		if self.client_address[1] not in FSP_LAST_GCZ_FILE:
+			FSP_LAST_GCZ_FILE[self.client_address[1]] = None
+
+		if (FSP_LAST_GET_FILE[self.client_address[1]] == "" or FSP_LAST_GET_FILE[self.client_address[1]] != self.fsp.path):
+			FSP_LAST_GET_FILE[self.client_address[1]] = self.fsp.path
+			print(f"{self.client_address} Serving file \"{self.fsp.path}\"")
 
 		# check if the file being served is a .gcz file
 		if self.fsp.path.endswith(".iso") and not osp.isfile(self.fsp.path):
 			gcz_filename = self.fsp.path.replace(".iso", ".gcz")
 			if osp.isfile(gcz_filename):
 				# open and cache a GCZ image
-				if FSP_LAST_GCZ_FILE is None:
+				if FSP_LAST_GCZ_FILE[self.client_address[1]] is None:
 					gcz = GCZImage(gcz_filename)
 					gcz.seek(self.fsp.position)
 					buf = gcz.read(self.fsp.block_size, True)
-					FSP_LAST_GCZ_FILE = gcz
+					FSP_LAST_GCZ_FILE[self.client_address[1]] = gcz
 				# opening a different GCZ image than the one cached
-				elif FSP_LAST_GCZ_FILE is not None and FSP_LAST_GCZ_FILE.filename != FSP_LAST_GET_FILE.replace(".iso", ".gcz"):
-					FSP_LAST_GCZ_FILE.close()
-					FSP_LAST_GCZ_FILE = None
+				elif FSP_LAST_GCZ_FILE[self.client_address[1]] is not None and FSP_LAST_GCZ_FILE[self.client_address[1]].filename != FSP_LAST_GET_FILE[self.client_address[1]].replace(".iso", ".gcz"):
+					FSP_LAST_GCZ_FILE[self.client_address[1]].close()
+					FSP_LAST_GCZ_FILE[self.client_address[1]] = None
 
 					gcz = GCZImage(gcz_filename)
 					gcz.seek(self.fsp.position)
 					buf = gcz.read(self.fsp.block_size, True)
-					FSP_LAST_GCZ_FILE = gcz
+					FSP_LAST_GCZ_FILE[self.client_address[1]] = gcz
 				# reading from a cached GCZ image
 				else:
 					# print(f"Reading GCZ from cache \"{gcz_filename}\"")
-					FSP_LAST_GCZ_FILE.seek(self.fsp.position)
-					buf = FSP_LAST_GCZ_FILE.read(self.fsp.block_size, True)
+					FSP_LAST_GCZ_FILE[self.client_address[1]].seek(self.fsp.position)
+					buf = FSP_LAST_GCZ_FILE[self.client_address[1]].read(self.fsp.block_size, True)
 		else:  # serve a regular file
-			if FSP_LAST_GCZ_FILE is not None:
+			if FSP_LAST_GCZ_FILE[self.client_address[1]] is not None:
 				print("Clearing GCZ cache...")
-				FSP_LAST_GCZ_FILE.close()
-				FSP_LAST_GCZ_FILE = None
+				FSP_LAST_GCZ_FILE[self.client_address[1]].close()
+				FSP_LAST_GCZ_FILE[self.client_address[1]] = None
 
 			with open(self.fsp.path, "rb") as f:
 				f.seek(self.fsp.position)
 				buf = f.read(self.fsp.block_size)
+
+		FSP_LAST_GET_FILE_TIME[self.client_address[1]] = time.time()
 
 		rep = FSPPacket.create(self.fsp.command, buf, self.fsp.position, self.fsp.sequence).to_bytes()
 		with BytesIO(rep) as bio:
@@ -663,33 +752,50 @@ class FSPPacketHandler(DatagramRequestHandler):
 				self.wfile.write(buf)
 
 	def handle_up_load(self) -> None:
-		with open(FSP_UP_LOAD_CACHE_FILE, "a+b") as f:
+		tmpfullpath = f"{os.getcwd()}/tmp/{self.client_address[0]}_{self.client_address[1]}"
+
+		if not os.path.exists(tmpfullpath):
+			os.makedirs(tmpfullpath, exist_ok=True)
+		
+		with open(f"{tmpfullpath}/{FSP_UP_LOAD_CACHE_FILE}", "a+b") as f:
 			f.seek(self.fsp.position)
 			f.write(self.fsp.data)
-
+		
 		rep = FSPPacket.create(self.fsp.command, b"", self.fsp.position, self.fsp.sequence).to_bytes()
 		self.wfile.write(rep)
 
 	def handle_install(self) -> None:
-		print(f"Installing file to \"{self.fsp.path}\"...")
+		tmpfullpath = f"{os.getcwd()}/tmp/{self.client_address[0]}_{self.client_address[1]}"
 
-		os.rename(FSP_UP_LOAD_CACHE_FILE, self.fsp.path)
+		print(f"{self.client_address} is Installing file to \"{self.fsp.path}\"...")
+
+		shutil.copy(f"{tmpfullpath}/{FSP_UP_LOAD_CACHE_FILE}", self.fsp.path)
+		shutil.rmtree(tmpfullpath)
+
+		# Clear the cache for everyone connected
+		global_clear_caches()
 
 		rep = FSPPacket.create(self.fsp.command, b"", 0, self.fsp.sequence).to_bytes()
 		self.wfile.write(rep)
 
 	def handle_del_file(self) -> None:
-		print(f"Deleting file \"{self.fsp.path}\"...")
+		global FSP_LAST_GET_DIR_PKTS
+
+		print(f"{self.client_address} Deleting file \"{self.fsp.path}\"...")
 
 		if osp.isfile(self.fsp.path):
 			os.remove(self.fsp.path)
 			rep = FSPPacket.create(self.fsp.command, b"", self.fsp.position, self.fsp.sequence).to_bytes()
 		else:
 			rep = FSPPacket.create(FSPCommand.CC_ERR, b"Error deleting file!", 0, self.fsp.sequence).to_bytes()
+		
+		# Clear the cache for everyone connected
+		global_clear_caches()
+
 		self.wfile.write(rep)
 
 	def handle_get_pro(self) -> None:
-		print(f"Getting protection on \"{self.fsp.path}\"...")
+		print(f"{self.client_address} Getting protection on \"{self.fsp.path}\"...")
 
 		v = FSPProtection.OWNER
 		v |= FSPProtection.DEL
@@ -704,10 +810,13 @@ class FSPPacketHandler(DatagramRequestHandler):
 		self.wfile.write(rep.to_bytes())
 
 	def handle_make_dir(self) -> None:
-		print(f"Creating directory \"{self.fsp.path}\"...")
+		print(f"{self.client_address} Creating directory \"{self.fsp.path}\"...")
 
 		if not osp.isdir(self.fsp.path):
-			os.mkdir(self.fsp.path)
+			os.makedirs(self.fsp.path)
+
+		# Clear the cache for everyone connected
+		global_clear_caches()
 
 		v = FSPProtection.OWNER
 		v |= FSPProtection.DEL
@@ -728,7 +837,7 @@ class FSPPacketHandler(DatagramRequestHandler):
 		self.wfile.write(rep)
 
 	def handle_stat(self) -> None:
-		print(f"Stat'ing file \"{self.fsp.path}\"...")
+		print(f"{self.client_address} Stat'ing file \"{self.fsp.path}\"...")
 
 		# stat a .gcz file
 		if self.fsp.path.endswith(".iso") and not osp.isfile(self.fsp.path):
@@ -745,7 +854,7 @@ class FSPPacketHandler(DatagramRequestHandler):
 		self.wfile.write(rep)
 
 	def handle_rename(self) -> None:
-		print(f"Renaming \"{self.fsp.src_path}\" to \"{self.fsp.dst_path}\"...")
+		print(f"{self.client_address} Renaming \"{self.fsp.src_path}\" to \"{self.fsp.dst_path}\"...")
 
 		if osp.exists(self.fsp.src_path):
 			print(f"\"{self.fsp.src_path}\" doesn't exist, skipping...")
@@ -775,6 +884,11 @@ def parse_hostname_port(s: str):
 def main() -> None:
 	global FSP_PASSWORD, FSP_SERVER_DIR
 
+	if os.path.exists(os.getcwd() + "/tmp"):
+		shutil.rmtree(os.getcwd() + "/tmp")
+	
+	os.mkdir(os.getcwd() + "/tmp")
+
 	# check python version before running
 	assert version_info.major == 3 and version_info.minor >= 8, "This script requires Python 3.8 or greater!"
 
@@ -784,7 +898,7 @@ def main() -> None:
 	parser.add_argument("-d", "--directory", type=str, default="server", help="The directory to serve from")
 	args = parser.parse_args()
 
-	assert type(args.address) == tuple, "Invalid address:port pair specified"
+	assert type(args.address) is tuple, "Invalid address:port pair specified"
 
 	FSP_PASSWORD = args.password
 	FSP_SERVER_DIR = args.directory
@@ -793,6 +907,9 @@ def main() -> None:
 
 	print(f"FSP server running on {args.address[0]}:{args.address[1]}...")
 	print(f"Base Directory: \"{osp.abspath(FSP_SERVER_DIR)}\"")
+
+	threading.Thread(target=lambda: every(600, clean_old_caches)).start()
+
 	with ThreadingUDPServer((args.address[0], args.address[1]), FSPPacketHandler) as server:
 		server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 		server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

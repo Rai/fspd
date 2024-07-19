@@ -1,9 +1,11 @@
-FROM python:3.12 
+FROM python:3.13-rc 
 
-RUN mkdir /usr/src/app
+RUN mkdir -p /usr/src/app/data
 
-COPY fspd.py /usr/src/app
+COPY start.sh fspd.py /usr/src/app/
 
 WORKDIR /usr/src/app
 
-CMD ["python", "./fspd.py"]
+EXPOSE 7717/udp
+
+CMD [ "/usr/src/app/start.sh" ]
