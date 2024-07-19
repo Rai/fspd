@@ -500,7 +500,7 @@ class FSPPacket:
 		assert fsp.checksum == calc_cksm, f"Invalid FSP checksum, received: 0x{fsp.checksum:02X}, calculated: 0x{calc_cksm:02X}"
 
 		# command-specific parsing
-		if fsp.command in [FSPCommand.CC_GET_DIR, FSPCommand.CC_GET_PRO, FSPCommand.CC_MAKE_DIR]:
+		if fsp.command in [FSPCommand.CC_GET_DIR, FSPCommand.CC_GET_PRO, FSPCommand.CC_MAKE_DIR, FSPCommand.CC_DEL_DIR]:
 			(fsp.directory, fsp.password) = [x.rstrip(b"\x00").decode("UTF8") for x in fsp.data.split(b"\n", 1)]
 			fsp.path = pjoin(FSP_SERVER_DIR, fsp.directory.lstrip("/"))
 		elif fsp.command == FSPCommand.CC_RENAME:
@@ -589,6 +589,8 @@ class FSPPacketHandler(DatagramRequestHandler):
 			self.handle_stat()
 		elif self.fsp.command == FSPCommand.CC_RENAME:
 			self.handle_rename()
+		elif self.fsp.command == FSPCommand.CC_DEL_DIR:
+			self.handle_del_dir()
 		else:
 			self.handle_unhandled()
 
@@ -678,6 +680,17 @@ class FSPPacketHandler(DatagramRequestHandler):
 				print(f"{self.client_address} Reading directory \"{self.fsp.path}\"...")
 			rep = FSPPacket.create(self.fsp.command, FSP_LAST_GET_DIR_PKTS[self.client_address[1]][pkt_num][pkt_off:], self.fsp.position, self.fsp.sequence).to_bytes()
 			self.socket.sendto(rep, self.client_address)
+
+	def handle_del_dir(self) -> None:
+		print(f"{self.client_address} Deleting directory \"{self.fsp.path}\"...")
+
+		if osp.isdir(self.fsp.path):
+			shutil.rmtree(self.fsp.path, ignore_errors=True)
+			rep = FSPPacket.create(self.fsp.command, b"", self.fsp.position, self.fsp.sequence).to_bytes()
+		else:
+			rep = FSPPacket.create(FSPCommand.CC_ERR, b"Error deleting directory!", 0, self.fsp.sequence).to_bytes()
+
+		self.wfile.write(rep)
 
 	def handle_get_file(self) -> None:
 		global FSP_LAST_GET_FILE, FSP_LAST_GCZ_FILE
