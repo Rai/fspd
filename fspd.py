@@ -565,7 +565,7 @@ class FSPPacketHandler(DatagramRequestHandler):
 
 		self.fsp = FSPPacket.parse(data)
 
-		if self.fsp.command in [FSPCommand.CC_GET_DIR, FSPCommand.CC_GET_FILE, FSPCommand.CC_STAT, FSPCommand.CC_DEL_FILE, FSPCommand.CC_INSTALL]:
+		if self.fsp.command in [FSPCommand.CC_GET_DIR, FSPCommand.CC_GET_FILE, FSPCommand.CC_STAT, FSPCommand.CC_DEL_FILE, FSPCommand.CC_DEL_DIR, FSPCommand.CC_INSTALL]:
 			if not self.check_password():
 				return
 
